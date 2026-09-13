@@ -95,17 +95,13 @@ async function call<T = any>(action: string, payload: Record<string, any> = {}):
 
   const bodyStr = JSON.stringify({ action, idToken: token.get(), payload });
 
-  const res = bodyStr.length > URL_SAFE_LIMIT
-    ? await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: bodyStr,
-        redirect: 'follow',
-      })
-    : await fetch(API_URL + '?req=' + encodeURIComponent(bodyStr), {
-        method: 'GET',
-        redirect: 'follow',
-      });
+  // MUST use POST and text/plain to bypass CORS and survive the 302 redirect
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: bodyStr,
+    redirect: 'follow', // follow redirect to script.googleusercontent.com
+  });
 
   if (!res.ok) {
     throw new ApiException({ code: 'NETWORK_ERROR', message: 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (HTTP ' + res.status + ')' });
