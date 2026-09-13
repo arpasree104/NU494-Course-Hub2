@@ -25,6 +25,24 @@ export const USE_MOCK = !API_URL;
 
 const TOKEN_KEY = 'nu494_id_token';
 
+/* ─── แจ้งเตือนเมื่อยังไม่ได้ตั้งค่าเชื่อมต่อ ───────────────────────────
+ * ถ้า deploy ขึ้นโฮสต์จริงแล้วยังไม่ได้ใส่ VITE_API_URL หน้าเว็บจะขาวเปล่า
+ * โดยไม่รู้สาเหตุ — ตรงนี้จึงขึ้นแถบบอกให้ชัดแทนที่จะเงียบ
+ * ------------------------------------------------------------------- */
+if (USE_MOCK && typeof document !== 'undefined' && location.hostname !== 'localhost') {
+  window.addEventListener('DOMContentLoaded', () => {
+    const bar = document.createElement('div');
+    bar.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99999;padding:12px 16px;' +
+      'background:#8B1A1A;color:#fff;font:14px/1.6 system-ui,sans-serif;text-align:center';
+    bar.innerHTML =
+      '<b>ยังไม่ได้เชื่อมต่อระบบหลังบ้าน</b> — ' +
+      'กรุณาตั้งค่า <code>VITE_API_URL</code> และ <code>VITE_GOOGLE_CLIENT_ID</code> ' +
+      'ใน Environment Variables ของโฮสต์ แล้ว Redeploy อีกครั้ง';
+    document.body.appendChild(bar);
+  });
+}
+
 /* ─── ชนิดข้อมูลที่ใช้ร่วมกัน ─────────────────────────────────────────── */
 
 export type Role = 'ADMIN' | 'TEACHER' | 'STUDENT' | 'GUEST';
@@ -55,19 +73,39 @@ export const token = {
 /* ─── แกนกลางของการเรียก API ────────────────────────────────────────────── */
 
 /**
- * ใช้ Content-Type: text/plain โดยตั้งใจ
- * เพื่อให้เบราว์เซอร์ถือเป็น "simple request" ไม่ต้องยิง OPTIONS preflight
- * (Apps Script ไม่ตอบ preflight จึงจะพังถ้าใช้ application/json)
+ * เหตุผลที่ใช้ GET เป็นค่าเริ่มต้น (ไม่ใช่ POST) :
+ * Apps Script Web App ตอบทุกคำขอด้วย 302 redirect ไปที่ script.googleusercontent.com
+ * เสมอ ไม่ว่าเมธอดต้นทางจะเป็นอะไร — และตามสเปกของ fetch/เบราว์เซอร์ เมื่อ POST
+ * เจอ redirect (301/302/303) เมธอดของคำขอที่ตามไปจะถูก "เปลี่ยนเป็น GET" ให้เอง
+ * โดยอัตโนมัติ (เพื่อความเข้ากันได้แบบเดิม) ทำให้ปลายทางที่ Google บางครั้ง
+ * ตอบ 404 กลับมา เพราะคำขอที่ตามไปไม่ตรงกับที่ระบบคาดไว้ — อาการนี้ตรงกับที่พบ:
+ * เปิดลิงก์ /exec ตรง ๆ (GET) ได้ผลลัพธ์ปกติเสมอ แต่ fetch(POST) จาก฿เว็บ 404
+ *
+ * ทางแก้ : ส่งคำขอเป็น GET ทุกครั้งที่ทำได้ โดยฝัง JSON ทั้งก้อนไว้ใน query
+ * string (?req=...) เพราะ GET→GET ตอน redirect ไม่มีการเปลี่ยนเมธอด จึงไม่เจอ
+ * ปัญหานี้ ส่วน action ที่ payload มีขนาดใหญ่ (แนบไฟล์ / นำเข้า CSV) ที่ยัดใน
+ * query string ไม่พอ (ยาวเกิน URL_SAFE_LIMIT) จะ fallback ไปใช้ POST เหมือนเดิม
+ * — ถ้า Apps Script deployment ของคุณเจอปัญหา 404 กับ POST เหมือนกัน การอัปโหลด
+ * ไฟล์ขนาดใหญ่อาจยังพังอยู่ ต้องแก้ที่ต้นตอ POST/redirect แยกอีกที
  */
+const URL_SAFE_LIMIT = 6000; // ตัวอักษร — เผื่อระยะห่างจากขีดจำกัดความยาว URL ของเบราว์เซอร์/พร็อกซีต่าง ๆ
+
 async function call<T = any>(action: string, payload: Record<string, any> = {}): Promise<T> {
   if (USE_MOCK) return mockCall<T>(action, payload);
 
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action, idToken: token.get(), payload }),
-    redirect: 'follow',
-  });
+  const bodyStr = JSON.stringify({ action, idToken: token.get(), payload });
+
+  const res = bodyStr.length > URL_SAFE_LIMIT
+    ? await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: bodyStr,
+        redirect: 'follow',
+      })
+    : await fetch(API_URL + '?req=' + encodeURIComponent(bodyStr), {
+        method: 'GET',
+        redirect: 'follow',
+      });
 
   if (!res.ok) {
     throw new ApiException({ code: 'NETWORK_ERROR', message: 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (HTTP ' + res.status + ')' });
@@ -299,12 +337,50 @@ export function downloadCsv(fileName: string, csv: string) {
 
 /* ─── โหมดข้อมูลจำลอง ───────────────────────────────────────────────────── */
 
+/**
+ * action ที่ต้องคืนค่าเป็น "อาร์เรย์" เสมอ
+ * ถ้าคืน {} ไปแทน หน้าเว็บจะพังทันทีที่เรียก .map() หรือ .filter()
+ * (นี่คือสาเหตุของอาการ "s.filter is not a function" จอขาวทั้งหน้า)
+ */
+const LIST_ACTIONS = [
+  'menus.list', 'content.get', 'news.list', 'folders.list', 'files.list',
+  'classroom.list', 'users.list', 'assignments.list', 'submissions.mine',
+  'submissions.byAssignment', 'email.templates', 'email.logs', 'events.list',
+];
+
+/** ค่าว่างที่ปลอดภัยสำหรับแต่ละ action เมื่อยังไม่มีข้อมูลจำลอง */
+function safeEmpty<T>(action: string): T {
+  if (LIST_ACTIONS.includes(action)) return [] as unknown as T;
+
+  switch (action) {
+    case 'bootstrap.get':
+      return {
+        user: null, role: 'GUEST', menus: [], settings: {},
+        classroomLinks: [], academicYears: [], currentYearId: '',
+        serverTime: new Date().toISOString(),
+      } as unknown as T;
+
+    case 'reports.assignmentSummary':
+      return {
+        assignment: null,
+        summary: { total: 0, submitted: 0, onTime: 0, late: 0, pending: 0, percent: 0 },
+        rows: [],
+      } as unknown as T;
+
+    case 'auth.me':
+      return { user: null, permissions: {}, currentYearId: '' } as unknown as T;
+
+    default:
+      return {} as T;
+  }
+}
+
 async function mockCall<T>(action: string, payload: any): Promise<T> {
   await new Promise((r) => setTimeout(r, 150));   // จำลองความหน่วงของเครือข่าย
   const fn = (mock as any)[action.replace('.', '_')];
   if (typeof fn === 'function') return fn(payload);
-  console.warn('[mock] ยังไม่มีข้อมูลจำลองสำหรับ action:', action);
-  return {} as T;
+  console.warn('[mock] ยังไม่มีข้อมูลจำลองสำหรับ action:', action, '— คืนค่าว่างแทน');
+  return safeEmpty<T>(action);
 }
 
 export default api;
