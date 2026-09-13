@@ -45,6 +45,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error("Session expired or invalid", e);
         googleSignOut();
       });
+    } else if (USE_MOCK) {
+       // if using mock, just leave it as guest.
     }
   }, []);
 
